@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>4K 下落音游</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:#07070f;touch-action:none;user-select:none;-webkit-user-select:none;color:#fff;font-family:-apple-system,"PingFang SC",Arial,sans-serif}
+#cvs{position:fixed;inset:0;display:block}
+#over{position:fixed;inset:0;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:rgba(4,4,10,.84)}
+#over h2{font-size:26px;letter-spacing:2px;margin-bottom:14px}
+#over p{font-size:14px;line-height:2;opacity:.78}
+#over .st{font-size:14px;line-height:2.1;opacity:.92;margin-top:8px}
+#over span{margin-top:26px;font-size:13px;letter-spacing:1px;opacity:.4}
+</style>
+</head>
+<body>
+<canvas id="cvs"></canvas>
+<div id="over"></div>
+<script>
+(function(){
+'use strict';
+var cvs=document.getElementById('cvs'),ctx=cvs.getContext('2d'),over=document.getElementById('over');
+var LANES=4,LEAD=3.0,WIN=0.2,PF_W=0.06,GR_W=0.12;
+var COLORS=['#22e6ff','#8b6cff','#ff4f8b','#ffcc3d'];
+var W,H,hitY,laneW,pxs;
+
+function layout(){
+  var dpr=Math.min(devicePixelRatio||1,2);
+  W=innerWidth;H=innerHeight;
+  cvs.width=Math.round(W*dpr);cvs.height=Math.round(H*dpr);
+  cvs.style.width=W+'px';cvs.style.height=H+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  hitY=Math.round(H*0.80);
+  laneW=W/LANES;
+  pxs=(hitY+80)/LEAD;
+}
+layout();
+addEventListener('resize',layout);
+addEventListener('orientationchange',function(){setTimeout(layout,120)},{passive:true});
+
+/* ---------- 谱面：连续时间轴，不再出现相位跳变 ---------- */
+function buildChart(){
+  var notes=[],T=0,dt=0.44,i,l,lane;
+  function pick(n){
+    var a=[];
+    while(a.length<n){lane=(Math.random()*4)|0;if(a.indexOf(lane)<0)a.push(lane);}
+    return a;
+  }
+  for(var b=0;b<700;b++){
+    if(b===220)dt=0.33;
+    if(b===460)dt=0.32;
+    var cnt;
+    if(b<220) cnt=(b%2===0)?((b%4===0)?2:1):0;
+    else if(b<460) cnt=(b%7===0)?3:((b%3===0)?2:1);
+    else cnt=(b%5===0)?2:1;
+    if(cnt){
+      var ls=pick(cnt);
+      for(i=0;i<ls.length;i++)notes.push({time:T,lane:ls[i],judged:0,at:0});
+    }
+    T+=dt;
+  }
+  return notes;
+}
+
+var notes,totalNotes,lastTime,score,combo,maxCombo,pf,gr,gd,ms,judgedCount;
+var t=0,start=0,running=false,fin=false,finAt=0;
+var flash=[],pop=[];
+
+function reset(){
+  notes=buildChart();totalNotes=notes.length;lastTime=notes[totalNotes-1].time;
+  score=0;combo=0;maxCombo=0;pf=0;gr=0;gd=0;ms=0;judgedCount=0;
+  t=0;start=0;running=false;fin=false;finAt=0;
+  for(var i=0;i<LANES;i++){flash[i]=-9;pop[i]={txt:'',at:-9,col:''};}
+}
+reset();
+
+/* ---------- 音效 ---------- */
+var ac=null;
+function beep(freq,dur,vol){
+  try{
+    if(!ac)ac=new (window.AudioContext||window.webkitAudioContext)();
+    var o=ac.createOscillator(),g=ac.createGain(),n=ac.currentTime;
+    o.type='triangle';o.frequency.value=freq;
+    g.gain.setValueAtTime(vol||0.05,n);
+    g.gain.exponentialRampToValueAtTime(0.0001,n+dur);
+    o.connect(g);g.connect(ac.destination);o.start(n);o.stop(n+dur);
+  }catch(e){}
+}
+
+/* ---------- 判定 ---------- */
+function judgeColor(txt){
+  return txt==='PERFECT'?'#ffcc3d':txt==='GREAT'?'#22e6ff':txt==='GOOD'?'#8b6cff':txt==='MISS'?'#ff4455':'#fff';
+}
+function doHit(lane){
+  if(!running||fin)return;
+  flash[lane]=t;
+  var best=null,bd=WIN,i,n,d;
+  for(i=0;i<totalNotes;i++){
+    n=notes[i];
+    if(n.judged||n.lane!==lane)continue;
+    d=Math.abs(n.time-t);
+    if(d<bd){bd=d;best=n;}
+  }
+  if(!best){beep(220,0.05,0.03);return;}
+  var txt,d2=Math.abs(best.time-t),add;
+  if(d2<=PF_W){txt='PERFECT';pf++;add=300;}
+  else if(d2<=GR_W){txt='GREAT';gr++;add=200;}
+  else{txt='GOOD';gd++;add=100;}
+  best.judged=1;best.at=t;
+  combo++;if(combo>maxCombo)maxCombo=combo;
+  score+=add+Math.min(combo,100)*2;
+  judgedCount++;
+  pop[lane]={txt:txt,at:t,col:judgeColor(txt)};
+  beep(txt==='PERFECT'?880:txt==='GREAT'?660:520,0.07,0.05);
+}
+function doMiss(n){
+  n.judged=2;n.at=t;ms++;judgedCount++;combo=0;
+  pop[n.lane]={txt:'MISS',at:t,col:judgeColor('MISS')};
+}
+
+/* ---------- 更新 ---------- */
+function update(){
+  var i,n;
+  for(i=0;i<totalNotes;i++){
+    n=notes[i];
+    if(!n.judged&&t-n.time>WIN){doMiss(n);}
+  }
+  if(!fin&&judgedCount>=totalNotes){
+    fin=true;finAt=t;
+  }
+  if(fin&&t-finAt>0.6&&over.style.display!=='flex')showResult();
+}
+
+function acc(){
+  var w=pf+gr*0.75+gd*0.45;
+  return totalNotes?Math.round(w/totalNotes*10000)/100:0;
+}
+
+/* ---------- 绘制 ---------- */
+function rr(x,y,w,h,r){
+  ctx.beginPath();
+  if(ctx.roundRect){ctx.roundRect(x,y,w,h,r);return;}
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+
+function draw(){
+  var i,n,l,x,y,w,h,d,k;
+
+  ctx.fillStyle='#07070f';ctx.fillRect(0,0,W,H);
+  for(i=0;i<LANES;i++)if(i%2===0){ctx.fillStyle='rgba(255,255,255,.026)';ctx.fillRect(i*laneW,0,laneW,H);}
+
+  ctx.strokeStyle='rgba(90,140,255,.28)';ctx.lineWidth=1;
+  for(i=1;i<LANES;i++){ctx.beginPath();ctx.moveTo(i*laneW,0);ctx.lineTo(i*laneW,H);ctx.stroke();}
+
+  for(i=0;i<LANES;i++){
+    if(t-flash[i]<0.16){
+      k=1-(t-flash[i])/0.16;
+      ctx.globalAlpha=k*0.35;ctx.fillStyle=COLORS[i];
+      ctx.fillRect(i*laneW,0,laneW,H);ctx.globalAlpha=1;
+    }
+  }
+
+  for(i=0;i<LANES;i++){
+    ctx.globalAlpha=0.16;ctx.fillStyle=COLORS[i];
+    ctx.fillRect(i*laneW,hitY-1,laneW,2);ctx.globalAlpha=1;
+  }
+  ctx.strokeStyle='#fff';ctx.lineWidth=2;
+  ctx.shadowColor='#33ccff';ctx.shadowBlur=16;
+  ctx.beginPath();ctx.moveTo(0,hitY);ctx.lineTo(W,hitY);ctx.stroke();
+  ctx.shadowBlur=0;
+
+  w=Math.min(laneW*0.62,132);h=Math.min(28,w*0.22)+14;
+  for(i=0;i<totalNotes;i++){
+    n=notes[i];d=n.time-t;
+    if(d>LEAD||d<-0.45)continue;
+    x=n.lane*laneW+laneW/2;
+    y=hitY-d*pxs;
+    if(n.judged===1){
+      k=1-(t-n.at)/0.2;
+      if(k<=0)continue;
+      ctx.globalAlpha=k;ctx.fillStyle='#fff';
+      rr(x-w/2,y-h/2,w,h*k*0.8+h*0.2,8);ctx.fill();
+      ctx.globalAlpha=1;continue;
+    }
+    if(n.judged===2){
+      k=1-(t-n.at)/0.35;
+      if(k<=0)continue;
+      ctx.globalAlpha=k*0.45;ctx.fillStyle='#ff4455';
+      rr(x-w/2,y-h/2,w,h,8);ctx.fill();ctx.globalAlpha=1;continue;
+    }
+    ctx.shadowColor=COLORS[n.lane];ctx.shadowBlur=14;
+    ctx.fillStyle=COLORS[n.lane];ctx.globalAlpha=0.95;
+    rr(x-w/2,y-h/2,w,h,8);ctx.fill();
+    ctx.globalAlpha=1;ctx.shadowBlur=0;
+    ctx.fillStyle='rgba(255,255,255,.55)';
+    rr(x-w/2+6,y-h/2+4,w-12,3,2);ctx.fill();
+  }
+
+  ctx.textAlign='center';
+  ctx.font='bold 16px -apple-system,Arial';
+  for(i=0;i<LANES;i++){
+    if(t-pop[i].at<0.42&&pop[i].txt){
+      k=1-(t-pop[i].at)/0.42;
+      ctx.globalAlpha=k;ctx.fillStyle=pop[i].col;
+      ctx.fillText(pop[i].txt,i*laneW+laneW/2,hitY-72-(1-k)*14);
+      ctx.globalAlpha=1;
+    }
+  }
+
+  ctx.fillStyle='rgba(0,220,255,.16)';
+  ctx.fillRect(0,H-4,W*(t/lastTime||0),4);
+
+  ctx.textAlign='left';
+  ctx.fillStyle='#fff';ctx.globalAlpha=0.9;
+  ctx.font='bold 22px -apple-system,Arial';
+  ctx.fillText(score,16,34);
+  ctx.font='12px -apple-system,Arial';ctx.globalAlpha=0.5;
+  ctx.fillText('SCORE',17,50);
+  ctx.textAlign='right';ctx.globalAlpha=0.85;
+  ctx.font='16px -apple-system,Arial';
+  ctx.fillText(acc()+'%',W-16,34);
+  ctx.font='12px -apple-system,Arial';ctx.globalAlpha=0.5;
+  ctx.fillText('ACCURACY',W-16,50);
+  ctx.globalAlpha=1;
+
+  if(combo>2){
+    ctx.textAlign='center';
+    ctx.fillStyle='#22e6ff';ctx.globalAlpha=0.92;
+    ctx.shadowColor='#22e6ff';ctx.shadowBlur=22;
+    ctx.font='bold 40px -apple-system,Arial';
+    ctx.fillText(combo,W/2,H*0.26);
+    ctx.shadowBlur=0;
+    ctx.font='11px -apple-system,Arial';ctx.globalAlpha=0.55;ctx.fillStyle='#fff';
+    ctx.fillText('COMBO',W/2,H*0.26+18);
+    ctx.globalAlpha=1;
+  }
+
+  if(fin){
+    ctx.textAlign='center';ctx.fillStyle='#fff';ctx.globalAlpha=0.9;
+    ctx.font='bold 26px -apple-system,Arial';
+    ctx.fillText('谱面完成',W/2,H*0.42);
+    ctx.globalAlpha=1;
+  }
+}
+
+/* ---------- 主循环：时间驱动，帧率无关 ---------- */
+function loop(ts){
+  requestAnimationFrame(loop);
+  if(!running)return;
+  if(!start)start=ts;
+  t=(ts-start)/1000;
+  update();draw();
+}
+
+var hideAt=0;
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden){hideAt=performance.now();}
+  else if(hideAt&&running){start+=performance.now()-hideAt;hideAt=0;}
+});
+
+/* ---------- 输入 ---------- */
+function laneAt(x){
+  x=x<0?0:x>=W?W-1:x;
+  return (x/laneW)|0;
+}
+document.addEventListener('pointerdown',function(e){
+  if(over.style.display==='flex')return;
+  e.preventDefault();doHit(laneAt(e.clientX));
+},{passive:false});
+
+var keyMap={KeyD:0,KeyF:1,KeyJ:2,KeyK:3};
+document.addEventListener('keydown',function(e){
+  if(e.repeat)return;
+  var l=keyMap[e.code];
+  if(l!==undefined){e.preventDefault();doHit(l);}
+  else if(e.code==='Space')e.preventDefault();
+});
+document.addEventListener('contextmenu',function(e){e.preventDefault()});
+
+/* ---------- 界面 ---------- */
+function showStart(){
+  over.innerHTML='<h2>4K 下落</h2><p>音符落到白线时点击对应轨道<br>键盘 D F J K 同样可用</p><span>轻触开始</span>';
+  over.style.display='flex';
+}
+function showResult(){
+  running=false;
+  over.innerHTML='<h2>谱面完成</h2><div class="st">分数 '+score+'<br>最高连击 '+maxCombo+'<br>准确率 '+acc()+'%<br>PERFECT '+pf+'　GREAT '+gr+'　GOOD '+gd+'　MISS '+ms+'</div><span>轻触重新开始</span>';
+  over.style.display='flex';
+}
+over.addEventListener('pointerdown',function(e){
+  e.preventDefault();e.stopPropagation();
+  e0();
+});
+var e0=function(){
+  over.style.display='none';
+  if(fin)reset();
+  running=true;start=0;
+  requestAnimationFrame(loop);
+  draw();
+};
+showStart();
+draw();
+})();
+</script>
+</body>
+</html>
